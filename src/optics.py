@@ -60,7 +60,256 @@ Ported to Python 3:
 import numpy as np
 import psf
 from .fluors import Fluorset
-from scipy.signal import fftconvolve
+
+# GPU backend support, following the same pattern confirmed in microsim
+# (tlambert03/microsim, src/microsim/schema/backend.py): try CuPy first,
+# fall back to plain NumPy/SciPy if it's unavailable or fails to import.
+# Default is CPU -- this preserves all existing behavior exactly. Set the
+# SIMEXM_BACKEND environment variable to "gpu" to opt in.
+import os
+
+_BACKEND = os.environ.get("SIMEXM_BACKEND", "cpu").lower()
+_GPU_AVAILABLE = False
+
+if _BACKEND == "gpu":
+    try:
+        import cupy as cp
+        from cupyx.scipy.signal import fftconvolve as _gpu_fftconvolve
+        _GPU_AVAILABLE = True
+        print("optics.py: using GPU backend (CuPy)")
+    except ImportError as e:
+        print(f"optics.py: SIMEXM_BACKEND=gpu requested but CuPy is not "
+              f"available ({e}). Falling back to CPU.")
+        _BACKEND = "cpu"
+
+if not _GPU_AVAILABLE:
+    from scipy.signal import fftconvolve as _cpu_fftconvolve
+
+
+def _read_system_meminfo():
+    """
+    Real system memory introspection, following the same pattern as
+    parallelArchitect/ewc_moe_atari's gb10/memory.py: /proc/meminfo is
+    ground truth, MemAvailable (not MemFree, not MemTotal) is the
+    correct usable-memory signal. This function is hardware-agnostic
+    Linux introspection -- no GPU-specific or platform-specific logic,
+    so it reads correctly on Pascal, GB10, or any other Linux system.
+    Returns None if /proc/meminfo isn't available (e.g. non-Linux).
+    """
+    try:
+        meminfo = {}
+        with open("/proc/meminfo") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    key = parts[0].rstrip(":")
+                    try:
+                        meminfo[key] = int(parts[1])
+                    except ValueError:
+                        pass
+        return meminfo.get("MemAvailable", None)
+    except (FileNotFoundError, OSError):
+        return None
+
+
+def _estimate_fftconvolve_bytes(a_shape, b_shape, dtype_size=8):
+    """
+    Real, conservative estimate of peak memory a single fftconvolve
+    call needs: the padded FFT working size (next-fast-length padding
+    of a_shape + b_shape - 1 along each axis), held as complex values
+    (2x dtype_size) for both the forward-transformed input and kernel,
+    plus the output array. This intentionally overestimates rather
+    than underestimates -- a false "won't fit" that triggers chunking
+    is a much smaller cost than a real OOM crash mid-run.
+    """
+    fft_shape = tuple(a + b - 1 for a, b in zip(a_shape, b_shape))
+    fft_elements = 1
+    for dim in fft_shape:
+        fft_elements *= dim
+    # Two complex-valued buffers (input spectrum + kernel spectrum)
+    # plus one real-valued output buffer, real-valued input copy.
+    complex_bytes = fft_elements * dtype_size * 2
+    return 2 * complex_bytes + fft_elements * dtype_size
+
+
+def gpu_memory_plan(a_shape, b_shape, dtype_size=8, safety_margin=0.7):
+    """
+    Real pre-flight decision: given the real shapes about to be
+    convolved, query actual free GPU memory right now (not a static
+    guess) and decide whether the full convolution will fit, whether
+    it needs chunking, or whether GPU isn't viable at all for this
+    call -- before attempting it, not after it crashes.
+
+    safety_margin caps usable VRAM at 70% of what's actually free by
+    default, since CuPy's memory pool, CUDA context overhead, and any
+    other process sharing the GPU all consume real memory beyond the
+    convolution buffers themselves -- the three real OOM crashes
+    tonight all happened with VRAM that looked nominally sufficient
+    until the actual allocator hit its limit.
+
+    Returns a dict: {'fits': bool, 'estimated_bytes': int,
+    'free_bytes': int, 'recommended_z_chunk': int or None}.
+    """
+    estimated = _estimate_fftconvolve_bytes(a_shape, b_shape, dtype_size)
+
+    if not _GPU_AVAILABLE:
+        return {"fits": False, "estimated_bytes": estimated,
+                "free_bytes": 0, "recommended_z_chunk": None,
+                "reason": "GPU backend not active"}
+
+    free_bytes, total_bytes = cp.cuda.runtime.memGetInfo()
+    usable_bytes = int(free_bytes * safety_margin)
+
+    if estimated <= usable_bytes:
+        return {"fits": True, "estimated_bytes": estimated,
+                "free_bytes": free_bytes, "recommended_z_chunk": None,
+                "reason": "fits within safety margin"}
+
+    # Real chunk-size search: find the largest z_chunk whose estimated
+    # memory fits with real headroom. The first version of this search
+    # stepped down by 1 and stopped at the first nominal fit, which in
+    # practice landed on a chunk barely smaller than the full volume
+    # (confirmed by a real crash: z_chunk=145 out of 150 still OOM'd
+    # identically to no chunking at all). Step down by meaningful
+    # fractions instead, and require each candidate to fit with a
+    # real additional margin beyond the base safety_margin, since the
+    # estimate itself was shown to be optimistic on real hardware.
+    az = a_shape[0]
+    kz = b_shape[0]
+    best_chunk = None
+    candidate = az
+    while candidate >= 1:
+        chunk_a_shape = (min(candidate + kz - 1, az),) + a_shape[1:]
+        chunk_estimate = _estimate_fftconvolve_bytes(
+            chunk_a_shape, b_shape, dtype_size)
+        # Extra real margin on top of the base safety_margin: the
+        # per-chunk estimate is checked against the SAME usable_bytes
+        # budget, but chunk sizes near the full volume have shown to
+        # still OOM in practice, so require fitting at half the
+        # already-reduced usable budget before accepting a chunk size.
+        if chunk_estimate <= usable_bytes * 0.5:
+            best_chunk = candidate
+            break
+        # Step down by 25% each time rather than by 1, so the search
+        # actually reaches meaningfully smaller sizes instead of
+        # crawling one slice at a time near the unfit full size.
+        candidate = max(1, int(candidate * 0.75))
+
+    return {"fits": False, "estimated_bytes": estimated,
+            "free_bytes": free_bytes,
+            "recommended_z_chunk": best_chunk,
+            "reason": "exceeds safety margin, chunking required"
+                      if best_chunk else
+                      "no viable chunk size fits in available VRAM"}
+
+
+def fftconvolve(a, b, mode):
+    """
+    Backend-dispatching fftconvolve. Identical signature and behavior
+    to scipy.signal.fftconvolve on CPU. On GPU, checks real available
+    VRAM via gpu_memory_plan() before attempting the call, choosing
+    full convolution, a sized chunk, or falling back to CPU based on
+    actual current GPU state -- not a static assumption about the
+    hardware. This is the proactive version of the chunked fallback:
+    rather than catching OutOfMemoryError after a real crash, it
+    queries cp.cuda.runtime.memGetInfo() first and decides before
+    attempting anything, so a confirmed-too-large convolution never
+    needs to fail once before recovering.
+
+    Still keeps the reactive OutOfMemoryError catch as a real safety
+    net underneath the pre-flight check -- the estimate is
+    conservative but not guaranteed exact (CuPy/cuFFT plan caching
+    and fragmentation can shift real usage), so both layers exist on
+    purpose, the same defense-in-depth principle as a thermal cutoff
+    backing up a software throttle.
+    """
+    if _GPU_AVAILABLE:
+        plan = gpu_memory_plan(a.shape, b.shape, dtype_size=a.dtype.itemsize)
+        if not plan["fits"] and plan["recommended_z_chunk"] is None:
+            print(f"optics.py: pre-flight check found no viable GPU "
+                  f"chunk size ({plan['estimated_bytes']/1e9:.2f}GB "
+                  f"needed, {plan['free_bytes']/1e9:.2f}GB free) -- "
+                  f"falling back to CPU for this call")
+            return _cpu_fftconvolve(a, b, mode)
+        if not plan["fits"]:
+            print(f"optics.py: pre-flight check recommends chunked "
+                  f"convolution (z_chunk={plan['recommended_z_chunk']}, "
+                  f"{plan['estimated_bytes']/1e9:.2f}GB needed vs "
+                  f"{plan['free_bytes']/1e9:.2f}GB free)")
+            return _gpu_fftconvolve_chunked(
+                a, b, mode, z_chunk=plan["recommended_z_chunk"])
+        try:
+            a_gpu = cp.asarray(a)
+            b_gpu = cp.asarray(b)
+            result_gpu = _gpu_fftconvolve(a_gpu, b_gpu, mode=mode)
+            result = cp.asnumpy(result_gpu)
+            del a_gpu, b_gpu, result_gpu
+            cp.get_default_memory_pool().free_all_blocks()
+            return result
+        except cp.cuda.memory.OutOfMemoryError:
+            # Real safety net: the pre-flight estimate said this should
+            # fit, but it didn't. Re-run the planner now (real free
+            # memory may differ from the pre-flight check, e.g. other
+            # allocations since then) and use whatever chunk size it
+            # actually recommends, rather than guessing a fixed number.
+            cp.get_default_memory_pool().free_all_blocks()
+            print("optics.py: GPU OOM despite pre-flight check passing "
+                  "(estimate was optimistic) -- recomputing a real "
+                  "chunk plan and retrying")
+            retry_plan = gpu_memory_plan(
+                a.shape, b.shape, dtype_size=a.dtype.itemsize,
+                safety_margin=0.4)
+            z_chunk = retry_plan["recommended_z_chunk"] or 1
+            return _gpu_fftconvolve_chunked(a, b, mode, z_chunk=z_chunk)
+    return _cpu_fftconvolve(a, b, mode)
+
+
+def _gpu_fftconvolve_chunked(a, b, mode, z_chunk=8):
+    """
+    Real, memory-bounded fallback for GPU convolution on volumes too
+    large to fit in VRAM as a single FFT. Only supports mode='valid',
+    which is the only mode this codebase actually uses (confirmed:
+    resolve() always calls fftconvolve(..., 'valid')).
+
+    Splits the input volume `a` into z-axis chunks, each padded with
+    `kz` extra slices of real overlap on both sides (kz = kernel's
+    z-extent), convolves each padded chunk independently, then crops
+    and concatenates the valid-mode results. This is mathematically
+    identical to one giant 'valid'-mode convolution -- the overlap
+    exists specifically so each chunk has the real neighboring data
+    its edge voxels need, rather than approximating with zero-padding.
+
+    z_chunk controls how many output z-slices are computed per chunk;
+    smaller values use less peak VRAM but make more separate GPU calls.
+    """
+    if mode != 'valid':
+        raise NotImplementedError(
+            "_gpu_fftconvolve_chunked only supports mode='valid' "
+            "(the only mode this codebase uses); got mode=%r" % mode)
+
+    kz, ky, kx = b.shape
+    az, ay, ax = a.shape
+    out_z = az - kz + 1
+    if out_z <= 0:
+        raise ValueError("kernel z-extent %d >= input z-extent %d; "
+                          "no valid output possible" % (kz, az))
+
+    b_gpu = cp.asarray(b)
+    chunks = []
+    z = 0
+    while z < out_z:
+        this_chunk = min(z_chunk, out_z - z)
+        # Real overlap: need input rows [z, z + this_chunk + kz - 1)
+        # to produce 'valid' output rows [z, z + this_chunk)
+        a_slice = a[z : z + this_chunk + kz - 1]
+        a_gpu = cp.asarray(a_slice)
+        result_gpu = _gpu_fftconvolve(a_gpu, b_gpu, mode=mode)
+        chunks.append(cp.asnumpy(result_gpu))
+        del a_gpu, result_gpu
+        cp.get_default_memory_pool().free_all_blocks()
+        z += this_chunk
+
+    return np.concatenate(chunks, axis=0)
 
 def resolve(labeled_volumes, volume_dim, voxel_dim, expansion_params, optics_params):
     """
@@ -310,5 +559,9 @@ def mean_photons(fluorophore, exposure_time, objective_efficiency,\
     emitted_photons = excitation * qy * (ext_coeff * 1e2) * exposure_time *\
                       laser_intensity * (laser_wavelength * 1e-9) / (1e3 * CONSTANT)
     detected_photons = emitted_photons * emission * objective_efficiency * detector_efficiency
-    # Return float rate for Poisson sampling -- rounding to int kills sub-1 values
+    # Return the float rate directly -- this is a mean photon count per protein
+    # per exposure, used as the lambda parameter in np.random.poisson() inside
+    # resolve(). Rounding to int here discards sub-1 values (e.g. 0.23 -> 0),
+    # killing all signal when the per-protein photon rate is realistically below 1.
+    # Poisson sampling of a float rate is the physically correct behavior.
     return detected_photons

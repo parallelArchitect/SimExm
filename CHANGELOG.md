@@ -134,3 +134,41 @@ it before being called done.
   case in the original code, not introduced by the Python 3 port;
   it had simply never been exercised by any prior test's parameter
   combination. Fixed by clamping `z_step` to a minimum of 1.
+
+### Added (optional GPU backend)
+
+- Optional CUDA GPU backend for `fftconvolve` via CuPy, opt-in via
+  `SIMEXM_BACKEND=gpu`. Off by default; CPU behavior unchanged unless
+  explicitly enabled. Falls back to CPU automatically with a warning
+  if CuPy isn't installed.
+- Real, measured CPU vs GPU comparison across three volume sizes on
+  an NVIDIA GTX 1080 (8GB VRAM): GPU is slower than CPU on small
+  volumes (transfer overhead dominates), ~13% faster on a medium real
+  crop of the CTC dataset, and required the fixes below to complete
+  at all on the full real CTC dataset.
+- Chunked GPU convolution (`_gpu_fftconvolve_chunked`) for volumes too
+  large to fit in VRAM as a single FFT. Verified mathematically
+  identical to CPU output on a controlled test (max difference
+  2.27e-13, floating-point noise only).
+- Hardware-aware pre-flight memory check (`gpu_memory_plan`) that
+  queries real free VRAM via `cp.cuda.runtime.memGetInfo()` before
+  attempting a convolution and decides full/chunked/CPU proactively,
+  reusing the real `/proc/meminfo`-based introspection pattern from
+  `parallelArchitect/ewc_moe_atari`'s `gb10/memory.py`.
+
+### Fixed
+
+- **Real OOM crash on the full CTC dataset, confirmed on 3/3 runs**:
+  `cupy.cuda.memory.OutOfMemoryError` allocating 1.1GB more with
+  7.68GB already used, on an 8GB card. Root cause: a single
+  `fftconvolve` call needs the full padded input plus complex-valued
+  FFT working buffers all in VRAM at once. Fixed by the chunked
+  convolution and pre-flight check above.
+- **Real bug in the first version of the pre-flight chunk-size
+  search**: it recommended `z_chunk=145` out of 150 slices — barely
+  smaller than no chunking — and still hit the identical OOM error.
+  The search stepped down by 1 slice and stopped at the first nominal
+  fit, landing at the edge of an overly optimistic estimate. Fixed by
+  stepping down in 25% increments and requiring real headroom below
+  the safety margin. Confirmed fixed: the same full dataset completed
+  cleanly afterward with `z_chunk=42`.

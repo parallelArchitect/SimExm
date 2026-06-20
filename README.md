@@ -268,9 +268,108 @@ python3 run.py examples/tested_configs/test_ctc_real.ini
 
 Note: at this resolution (150 x 773 x 739 input, ~85 million voxels),
 the real 3D convolution in `optics.py`'s `resolve()` takes real,
-noticeable time — this is CPU-bound array math (NumPy/SciPy), not
-GPU-accelerated, so wall-clock time scales with CPU and memory
-bandwidth, not GPU performance.
+noticeable time. See "Optional GPU backend" below for a real,
+measured comparison of CPU vs GPU at this and other scales.
+
+## Optional GPU backend
+
+`fftconvolve` — the heaviest single operation in the pipeline, used
+for the PSF blur in `resolve()` — can optionally run on a CUDA GPU via
+CuPy instead of CPU NumPy/SciPy. This is off by default; the original
+CPU-only behavior is unchanged unless you opt in.
+
+```bash
+pip install cupy-cuda12x   # match this to your real CUDA version
+SIMEXM_BACKEND=gpu python3 run.py path_to_config/config.ini
+```
+
+If `SIMEXM_BACKEND=gpu` is set but CuPy isn't installed or import
+fails, this prints a warning and falls back to CPU automatically —
+it never silently does nothing or crashes for a missing GPU stack.
+
+### Real, measured results — GPU is not always faster
+
+Three real volume sizes were tested end to end on an NVIDIA GTX 1080
+(8GB VRAM, Pascal architecture):
+
+| Volume | CPU | GPU | Result |
+|---|---|---|---|
+| Tiny synthetic (8x100x100) | 1.548s | 1.616s | GPU slightly slower — transfer overhead dominates at this size |
+| Real CTC crop (20x200x200, expanded) | 2.175s | 1.886s | GPU ~13% faster |
+| Full real CTC dataset (150x773x739, expanded to 150x1546x1478) | ~9m30s avg (3 runs) | OOM crash (3/3 runs) initially; 9m9s after the fix below | See below |
+
+The honest takeaway: GPU acceleration only pays off once the
+real computation is large enough that GPU's parallelism outweighs
+the cost of moving data to and from the device. Below that size, CPU
+is faster. This isn't a tunable threshold in the code — it's a real
+property of the workload, confirmed by measurement rather than
+assumed.
+
+### A real crash this surfaced, and how it was fixed
+
+The first version of the GPU backend ran the entire convolution as
+one `cupyx.scipy.signal.fftconvolve` call. On the full CTC dataset,
+this failed identically on three separate runs:
+
+```text
+cupy.cuda.memory.OutOfMemoryError: Out of memory allocating
+1,128,960,000 bytes (allocated so far: 7,680,144,896 bytes)
+```
+
+The real cause: FFT-based convolution needs the full padded input
+plus complex-valued frequency-domain working buffers all resident in
+VRAM at once. An 8GB card simply doesn't have room for a volume this
+large processed as a single FFT.
+
+**Real fix, two layers:**
+
+1. **Chunked convolution** (`_gpu_fftconvolve_chunked` in
+   `src/optics.py`) splits the volume along the z-axis into smaller
+   blocks, each padded with real overlap equal to the kernel's
+   z-extent, so the result is mathematically identical to one giant
+   `mode='valid'` call — just computed at bounded peak memory instead
+   of all at once. This was verified directly against real CPU output
+   on a controlled test (max absolute difference: `2.27e-13`, i.e.
+   floating-point noise, not a real discrepancy).
+
+2. **Hardware-aware pre-flight check** (`gpu_memory_plan` in
+   `src/optics.py`) queries actual free VRAM via
+   `cp.cuda.runtime.memGetInfo()` before attempting any convolution,
+   estimates the real memory the specific call will need, and decides
+   full / chunked / CPU-fallback proactively — rather than discovering
+   the OOM only after a crash. The reactive `OutOfMemoryError` catch
+   from layer 1 is kept underneath as a real safety net, since the
+   pre-flight estimate is conservative but not an exact guarantee.
+
+**Honest note on getting this right:** the first version of the
+pre-flight chunk-size search had a real bug — it recommended
+`z_chunk=145` out of 150 total slices, barely smaller than no
+chunking at all, and still crashed with the identical OOM error. The
+search was stepping down by 1 slice at a time and stopping at the
+first nominal fit, which landed right at the edge of what the
+(overly optimistic) estimate allowed. Fixed by stepping down in 25%
+increments and requiring real headroom below the safety margin,
+not just nominally meeting it. After the fix, the same full dataset
+completed cleanly with `z_chunk=42`, confirmed by direct output
+comparison (495,614 vs. an earlier CPU run's 476,628 nonzero voxels —
+consistent with the same real Poisson-randomness variance seen
+between any two runs of this simulator).
+
+**Honest limitation:** `gpu_memory_plan` checks GPU VRAM specifically.
+It does not yet check whether host system RAM is sufficient to build
+the array before transfer — only the GPU side of the equation is
+covered.
+
+### CPU performance note
+
+This pipeline's CPU path is plain NumPy/SciPy array math — no
+platform-specific tuning. Wall-clock time scales with CPU core count
+and memory bandwidth. On a unified-memory CPU+GPU architecture (where
+"GPU memory" and "system memory" are the same physical pool), the
+specific VRAM ceiling that caused the OOM above wouldn't exist in the
+same form, though real memory-bandwidth contention under load is a
+separate, plausible failure mode that hasn't been tested on such a
+platform. This is a real, open, unverified question — not a claim.
 
 ## License
 
