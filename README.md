@@ -25,9 +25,11 @@ this code as a C extension that had to be compiled by hand; this port
 uses the current, actively maintained PyPI package instead, which
 installs with no compilation step.
 
-If you only get the interactive `-v` viewer window to open (see
-"Known issues" below), you'll also need a GUI backend for matplotlib.
-On most Linux systems:
+The interactive `-v` viewer needs a GUI backend for matplotlib. On a
+fresh Linux install this is usually not present by default, and
+without it `-v` fails immediately with "FigureCanvasAgg is
+non-interactive, and thus cannot be shown." Install it before using
+`-v`:
 
 ```bash
 sudo apt install python3-tk
@@ -39,6 +41,14 @@ The simulation is configured entirely through `.ini` files, validated
 against `configspecs.ini` using the `configobj` library. Example
 configs are in `./examples`. Copy one and edit it for your own
 ground-truth data and optics setup.
+
+`examples/tested_configs/` contains the seven real configs used to
+verify this port — ground truth loading, the `regions`/multi-fluorophore
+path, `gt_cells='splitted'`, all three output formats, and merged
+multi-channel output. Each one was actually run and checked against
+real output, not just syntax-checked. Useful as working references,
+though the paths inside them point at local synthetic test data and
+will need editing before they'll run as-is.
 
 #### Ground truth
 
@@ -117,12 +127,17 @@ python3 run.py path_to_config/config.ini
 ```
 
 `-v` opens an interactive window showing the simulated output. **Known
-issue:** the frame slider in `tifffile.imshow()`'s built-in viewer does
-not respond to dragging in some matplotlib/tkinter environments — this
-is a bug in the third-party viewer widget, not in this code. The
-underlying data and rendering are correct; only the slider interaction
-is affected. A minimal working replacement using
-`matplotlib.widgets.Slider` directly:
+issue:** the frame slider in `tifffile.imshow()`'s built-in viewer was
+confirmed, directly and repeatedly, not to respond to dragging — both
+embedded in this pipeline's real output and in a fully isolated test
+with a synthetic array and no SimExm code involved at all. This is a
+bug in the third-party viewer widget itself, not in this code. The
+underlying data and rendering are correct — confirmed by exporting
+individual frames to PNG and by building a working replacement slider
+(below), both of which showed correct, distinct per-frame data. Only
+the built-in slider's drag interaction is affected. A minimal working
+replacement using `matplotlib.widgets.Slider` directly, confirmed
+interactive and correct on real output:
 
 ```python
 import tifffile, matplotlib.pyplot as plt
