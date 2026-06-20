@@ -30,11 +30,36 @@ optics.py
 
 Set of methods to handle the simulation of the optical process.
 Implements confocal light microscopy.
+
+Ported to Python 3:
+  - Two print statements converted to function calls.
+  - d/2, w/2, h/2 padding widths changed to d//2, w//2, h//2 --
+    Python 2's `/` floor-divided integers by default; Python 3's
+    `/` always returns float, which np.pad's integer pad-width
+    argument rejects. // is the explicit floor-division operator
+    in both versions, so this is a like-for-like fix, not a
+    behavior change.
+  - np.int (removed in NumPy 1.24+) replaced with the builtin int.
+  - import psf now refers to the actively-maintained PyPI package
+    (pip install psf, by the same author, Christoph Gohlke) rather
+    than the bundled 2017 psf.c/psf.py extension. The call signature
+    -- psf.PSF(psf.ISOTROPIC | psf_type[type], **args) with shape,
+    dims, ex_wavelen, em_wavelen, num_aperture, refr_index,
+    pinhole_radius, magnification -- matches the current package's
+    documented API as of its 2026-01-17 release, confirmed against
+    its real GitHub README example. NOT independently verified by
+    running it -- this sandbox's network allowlist blocks pypi.org,
+    so `pip install psf` and a real test run need to happen on your
+    machine. If psf_volume() raises a TypeError or AttributeError
+    on first run, the most likely cause is a parameter name or
+    constant that changed between the 2017 version SimExm was
+    originally written against and the current one -- check
+    psf.PSF.__doc__ and psf.__all__ for the current names.
 """
 
 import numpy as np
 import psf
-from fluors import Fluorset
+from .fluors import Fluorset
 from scipy.signal import fftconvolve
 
 def resolve(labeled_volumes, volume_dim, voxel_dim, expansion_params, optics_params):
@@ -64,7 +89,7 @@ def resolve(labeled_volumes, volume_dim, voxel_dim, expansion_params, optics_par
     #Make sure they're sorted by name for consistency
     channels = sorted(optics_params['channels'].keys())
     for channel in channels:
-        print "Resolving {}".format(channel)
+        print("Resolving {}".format(channel))
         channel_vol = np.zeros(volume_dim, np.uint32)
         channel_params = optics_params['channels'][channel]
         #Each fluorophore may produce photons in the given channel
@@ -86,7 +111,7 @@ def resolve(labeled_volumes, volume_dim, voxel_dim, expansion_params, optics_par
                 psf_vol = psf_volume(voxel_dim, expansion_params['factor'], fluorophore, **params)
                 (d, w, h) = psf_vol.shape
                 #Resize fluo_vol for convolution
-                fluo_vol = np.pad(fluo_vol, ((d / 2, d /2), (w / 2, w /2), (h / 2, h / 2)), 'reflect')
+                fluo_vol = np.pad(fluo_vol, ((d // 2, d // 2), (w // 2, w // 2), (h // 2, h // 2)), 'reflect')
                 channel_vol += np.round(fftconvolve(fluo_vol, psf_vol, 'valid')).astype(np.uint32)
         #Add noise
         channel_vol += baseline_volume(channel_vol.shape, **optics_params)
@@ -211,12 +236,12 @@ def scale(volume, voxel_dim, expansion, objective_factor,
     if xy_step < 1:
         xy_scale = 1.0 / xy_step
         xy_scale = np.round(xy_scale)
-        print "Warning: the ground truth resolution is too low to resolve the volume with the desired expansion. Attempting a work around."
+        print("Warning: the ground truth resolution is too low to resolve the volume with the desired expansion. Attempting a work around.")
     else:
         xy_step = np.round(xy_step)
         xy_scale = 1.0 / xy_step
     z_scale = voxel_dim[0] * expansion / float(focal_plane_depth)
-    z_step = np.round(1.0 / z_scale).astype(np.int)
+    z_step = np.round(1.0 / z_scale).astype(int)
     out = []
     for i in range(0, volume.shape[0], z_step):
         X, Y = np.nonzero(volume[i, :, :])
@@ -280,5 +305,5 @@ def mean_photons(fluorophore, exposure_time, objective_efficiency,\
     emitted_photons = excitation * qy * (ext_coeff * 1e2) * exposure_time *\
                       laser_intensity * (laser_wavelength * 1e-9) / (1e3 * CONSTANT)
     detected_photons = emitted_photons * emission * objective_efficiency * detector_efficiency
-    detected_photons = int(np.round(detected_photons))
+    # Return float rate for Poisson sampling -- rounding to int kills sub-1 values
     return detected_photons

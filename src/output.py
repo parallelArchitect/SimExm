@@ -38,14 +38,33 @@ separatly.
 Ground truth is stored on a per-channel basis, and cells can be put in the same volume
 or separated in a volume for each cell. This is useful when the expansion factor is small
 and there is overlap.
+
+Ported to Python 3:
+  - scipy.misc.imresize (removed from SciPy since 1.0) replaced with
+    skimage.transform.resize. The old imresize took a target shape
+    and an interp string ('nearest'); skimage's resize takes output_shape
+    and an integer `order` (0 = nearest-neighbor, matching 'nearest'
+    exactly) plus preserve_range=True so pixel values aren't rescaled
+    to [0,1] the way skimage normally does for float images, and
+    anti_aliasing=False since nearest-neighbor resizing of label/ID
+    images should not blend adjacent cell IDs together.
+  - images2gif.writeGif (unmaintained since ~2017) replaced with
+    imageio.mimsave, which writes the same GIF format and is the
+    actively maintained successor for this exact use case.
+  - xrange -> range in merge() (two instances).
+  - The hand-rolled zero-padding logic in save_as_image_sequence
+    (computing digit counts and building a '0' * n string manually)
+    replaced with an f-string zero-padding format spec, which is
+    both more readable and avoids the original's edge-case bug at
+    i=0 needing separate handling.
 """
 
 import os
-from tifffile import imsave
-from scipy.misc import imresize
+from tifffile import imwrite
+from skimage.transform import resize as sk_resize
 import numpy as np
 from PIL import Image
-from images2gif import writeGif
+import imageio.v3 as iio
 
 def save_as_tiff(volume, path, name, rgb):
     """
@@ -63,9 +82,9 @@ def save_as_tiff(volume, path, name, rgb):
     """
     dest = path + name + '.tiff'
     if rgb:
-        imsave(dest, volume, photometric='rgb')
+        imwrite(dest, volume, photometric='rgb')
     else:
-        imsave(dest, volume, photometric='minisblack')
+        imwrite(dest, volume, photometric='minisblack')
 
 def save_as_gif(volume, path, name, rgb):
     """
@@ -83,7 +102,8 @@ def save_as_gif(volume, path, name, rgb):
     """
     dest = path + name + '.gif'
     sequence = [np.squeeze(volume[i]) for i in range(volume.shape[0])]
-    writeGif(dest, sequence, duration=0.5)
+    #duration=0.5 seconds per frame, matching the original images2gif call
+    iio.imwrite(dest, sequence, duration=500, loop=0)
 
 def save_as_image_sequence(volume, path, name, rgb):
     """
@@ -101,14 +121,13 @@ def save_as_image_sequence(volume, path, name, rgb):
             whether to save the volume as an RGB stack or a single channel stack
     """
     sequence = [np.squeeze(volume[i]) for i in range(volume.shape[0])]
-    digits = np.floor(np.log10(volume.shape[0]))
+    #Number of digits needed to zero-pad the largest slice index
+    digits = len(str(volume.shape[0] - 1))
     dest = path + name
     if not os.path.isdir(dest):
         os.mkdir(dest)
     for i in range(volume.shape[0]):
-        #Compute appropriate number of 0's to add in front of the slice number
-        suffix = int(digits - np.floor(np.log10(i))) * '0' if i > 0 else int(digits) * '0'
-        im_path = dest + '/image_' + suffix + str(i) + '.png'
+        im_path = dest + f'/image_{i:0{digits}d}.png'
         if rgb:
             #'RGB' saves volume as rgb images
             im = Image.fromarray(np.squeeze(volume[i]), 'RGB')
@@ -131,11 +150,11 @@ def merge(volumes):
     out = []
     #Add missing channels to round up to % 3
     num_empty = 0 if len(volumes) % 3 == 0 else 3 - len(volumes) % 3
-    for i in xrange(num_empty):
+    for i in range(num_empty):
         empty = np.zeros_like(volumes[0])
         volumes.append(empty)
     #Split every 3 stacks
-    for i in xrange(0, len(volumes), 3):
+    for i in range(0, len(volumes), 3):
         vol = np.stack(volumes[i:i+3], axis = -1)
         out.append(vol.astype(np.uint8))
     return out
@@ -241,7 +260,9 @@ def save_gt(gt_dataset, labeled_cells, volume_dim, out_dim, voxel_dim, expansion
                 volume[tuple(voxels.transpose())] = int(cell)
                 #Optical resclaing
                 for i in range(0, volume.shape[0], z_step):
-                    resized = imresize(volume[i], (out_dim[1], out_dim[2]), interp='nearest')
+                    resized = sk_resize(volume[i], (out_dim[1], out_dim[2]),
+                                         order=0, preserve_range=True,
+                                         anti_aliasing=False).astype(volume.dtype)
                     resized[np.nonzero(resized)] = int(cell)
                     out[i // z_step] += resized
             sf(out, dest + fluorophore + '/', 'all_cells', False)
@@ -256,7 +277,9 @@ def save_gt(gt_dataset, labeled_cells, volume_dim, out_dim, voxel_dim, expansion
                 z_step = int(np.round(volume.shape[0] / float(out_dim[0])))
                 out = np.zeros(out_dim, np.uint32)
                 for i in range(0, volume.shape[0], z_step):
-                    out[i // z_step] = imresize(volume[i], (out_dim[1], out_dim[2]), interp='nearest')
+                    out[i // z_step] = sk_resize(volume[i], (out_dim[1], out_dim[2]),
+                                                  order=0, preserve_range=True,
+                                                  anti_aliasing=False).astype(volume.dtype)
                 #This fices a bug in the interpolation which rounds the non zero value to 255
                 out[np.nonzero(out)] = int(cell)
                 sf(out, dest + fluorophore + '/', str(cell), False)

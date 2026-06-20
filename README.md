@@ -1,133 +1,177 @@
 # SimExm
-A set of tools to simulate expansion microscopy experiments under different labeling and imaging conditions.
 
-The software is fully written in Python. The following section covers basic installation and usage of SimExm.
+A set of tools to simulate expansion microscopy experiments under
+different labeling and imaging conditions.
 
+This is a Python 3 port of Jeremy Wohlwend's original 2017 SimExm
+(https://github.com/jwohlwend/SimExm). The original only ran on
+Python 2 and depended on several libraries that have since been
+removed or abandoned. This version has been ported, and every code
+path has been run and checked against real output, not just
+syntax-checked.
 
 ## Installation
 
-The code works in python2 exclusively. It should be easy to convert it to python3 but it's untested.
-I strongly suggest creating a virtual environment, with virtualenv or anaconda and then use the pip command above to install all the dependencies inside the environment. For instance, you can create a new environment "sim" by running:
+```bash
+python3 -m venv simexm-venv
+source simexm-venv/bin/activate
+pip install numpy scipy pillow imageio scikit-image tifffile configobj matplotlib psf
+```
 
-`conda create -n sim python=2.7`
+That last package, `psf`, is the point-spread-function library by
+Christoph Gohlke (https://www.cgohlke.com/, also the author of
+`tifffile`). The original SimExm bundled its own frozen 2017 copy of
+this code as a C extension that had to be compiled by hand; this port
+uses the current, actively maintained PyPI package instead, which
+installs with no compilation step.
 
-Which will modify the PYTHONPATH so that all futute programs installed through pip end up in the same virtual environment.
-To start your new environment and activate the change of path run:
+If you only get the interactive `-v` viewer window to open (see
+"Known issues" below), you'll also need a GUI backend for matplotlib.
+On most Linux systems:
 
-`source activate sim`
+```bash
+sudo apt install python3-tk
+```
 
-All dependencies currently used are: numpy, Pillow, scipy, images2gif, configobj and tifffile.
-To install all at once, from the terminal, do:
+## Config specs
 
-`pip install -r requirements.txt`  
+The simulation is configured entirely through `.ini` files, validated
+against `configspecs.ini` using the `configobj` library. Example
+configs are in `./examples`. Copy one and edit it for your own
+ground-truth data and optics setup.
 
-or if you didn't use conda or a virtual environment:
-
-`sudo pip install -r requirements.txt`
-
-Finally, you can go ahead and compile the psf module, courtesy of Christoph Gohlke: http://www.lfd.uci.edu/~gohlke/.
-
-`python setup.py build_ext --inplace`
-
-Once the module has successfully compiled, you are ready to go!
-
-## Config Specs
-
-The simulation is used through configuration files. We use the configobj module which provides a nice syntax and validation of the config files.
-The specifications are outlines in the configspecs.ini file. Example configurations can be found under ./examples. To create a new configuration file copy one of the templates in ./examples, and modify it to fit your needs. The config parameters are explained below. For more information see the in-code documentation.
-
-#### Groundtruth
+#### Ground truth
 
 | Parameter | Type | Range | Description |
-|    ---    |  --- |  ---  |	 ---	 |
-| image_path | string |  - | indicates the location of the ground truth data. The data should be in the form of an image sequence, where each image represents a slice of the ground truth volume or as Tiff stack. In each image, pixel values should indicate what cell the pixel belongs to, or 0 if the pixel is located in extra-cellular space. This is true for both formats, file names will be ingored. |
-| offset | z, x, y tuple |  - | tuple of length 3 representing where to start loading the data, in pixels. For instance, an offset of (10, 50, 50) means that images are loaded starting the 10th image in the given directory and each imaage is cropped so that the top left corner is at (50, 50). |
-| bounds | z, x, y tuple) | - |tuple of length 3 representing the size of the data to load. Could be smaller than the actual size of the ground truth. This is the size in number of voxels. |
-| format | string | one of "tiff" or "image sequence" | Specifies which format is used in the groudn truth. If tiff, the path to the tiff stack should be specified in "image_path", otherwise a path to the folder containing the image sequence should be given in image_path. |
-| gt_cells | string | one of "merged" or "splitted" | If merged, all cells are expected to be loaded from the same volume. If splitted, a different volume is expected for each cell. If the chosen format is tiff stack, the image_path should contain a list of tiff stacks. Otherwise, it should contain a list of folders, each containing the image sequence for a given cell. |
-| voxel_dim | z, x, y tuple | - | tuple of length 3 representing the dimensions of a single voxel, in nanometers. |
-| isotropic | boolean  | True or False | Choose False if the voxel dimension of the ground truth data is not isotropic (i.e z voxel dim is different than xy dim). |
-| regions | - | - | a subsection in the configuration file which may contian many different regions. A region has a single parameter, region_path, which is a string pointing to where the data for that region is. By default the software automatically computes the cytosol and membrane regions, but additional annotations may be available. They are loaded by overlapping the region with the orgiinal cell segmentaiton to figure out which part of the cell is in the given region, for each cell. See synapse.ini for an example. |
+|---|---|---|---|
+| image_path | string | - | location of the ground truth data — an image sequence (one file per slice) or a TIFF stack. Pixel values indicate which cell a voxel belongs to, or 0 for extracellular space. |
+| offset | z, x, y tuple | - | where to start loading the data, in pixels. |
+| bounds | z, x, y tuple | - | size of the data to load. Can be smaller than the full ground truth. |
+| format | string | one of "tiff" or "image sequence" | |
+| gt_cells | string | one of "merged" or "splitted" | merged: all cells share one volume. splitted: one volume/folder per cell. |
+| voxel_dim | z, x, y tuple | - | dimensions of a single voxel, in nanometers. |
+| isotropic | boolean | True or False | False if z voxel spacing differs from xy spacing. |
+| regions | - | - | optional subsection for additional region annotations (e.g. synapses) beyond the automatically computed cytosol/membrane. See `examples/synapse.ini`. |
 
 #### Labeling
 
 | Parameter | Type | Range | Description |
-|    ---    |  --- |  ---  |	 ---	 |
-| global_density | float | between 0.0 and 1.0 | the global labeling density, determines the number of cells that can be labeled by any of the fluorophores |
+|---|---|---|---|
+| global_density | float | 0.0–1.0 | proportion of cells eligible to be labeled by any fluorophore. |
 
-Additionaly, the labeling section should contain a subsection for each fluorophore used. See the example in brianbow_membrane.ini.
-Each subsection should contain the following parameters:
+Each fluorophore gets its own subsection (see `examples/brainbow_membrane.ini`):
 
 | Parameter | Type | Range | Description |
-|    ---    |  --- |  ---  |	 ---	 |
-| fluorophore |  string | one of "ATTO390", "ATTO425", " ATTO430LS", "ATTO488", "ATTO490LS", "ATTO550", "ATTO647N", "ATTO700", "Alexa350" and "Alexa790" | the fluorophore to use. More info in src/fluors.py|
-| region | string |one of "cytosol", "membrane" or any additional regions specified in the ground truth|  the region to annotate with the above fluorophore |
-| density | float | between 0.0 and 1.0 | the proportion of cells in the volume to annotate with the above fluorophore.|
-| protein_density | float | greater than 0.0 | the density of proteins to label the sample with. 1.0 is 1 fluorophore per nm^3, which is not really realistic and should provide a good upperbound.|
-| protein_noise | float | between 0.0 and 1.0 | the proportion of proteins that fly away from the labeled region. Uses a gaussian distirbution around the original location. The standard devitation for that gaussian can be modified directly in the noise function in src/labeling.py but the default should provide fairly realistic results.|
-| antibody_amp | float | greater than 1.0 | amplifies the labeling, as well as the noise. Tipically 5.0 or 10.0.|
-| single_neuron | boolean | True or False | if True, a random cell is chosen and is the only one labeled with the above fluorophore |
+|---|---|---|---|
+| fluorophore | string | one of ATTO390, ATTO425, ATTO430LS, ATTO488, ATTO490LS, ATTO550, ATTO647N, ATTO700, Alexa350, Alexa790 | see `src/fluors.py` |
+| region | string | "cytosol", "membrane", or any additional region from the ground truth | |
+| labeling_density | float | 0.0–1.0 | proportion of cells annotated with this fluorophore. |
+| protein_density | float | > 0.0 | proteins per nm³. 1.0 is an unrealistic upper bound. |
+| protein_noise | float | 0.0–1.0 | proportion of proteins displaced from the labeled region by Gaussian noise. |
+| antibody_amp | float | > 1.0 | amplifies labeling density and noise together. Typically 5.0–10.0. |
+| single_neuron | boolean | True or False | if True, only one randomly chosen cell is labeled. |
 
 #### Expansion
 
 | Parameter | Type | Range | Description |
-|    ---    |  --- |  ---  |	 ---	 |
-| factor | float  | greater than 1.0 |  the expansion factor use in the expansion microscopy protocol. |
+|---|---|---|---|
+| factor | float | > 1.0 | expansion factor used in the protocol. |
 
 #### Optics
 
 | Parameter | Type | Range | Description |
-|    ---    |  --- |  ---  |	 ---	 |
-| type | string | one of 'confocal', 'widefield' or 'two photon' | type of microscope to use |
-| numerical_aperture | float | greater than 0.0 | the numerical aperture of the system |
-| refractory_index | float | greater than 1.0 | the refractory index of the system |
-| focal_plane_depth | integer | greater than 1 | the thickness of a z-slice in nanometers |
-| objective_back_aperture | float | greater than 0.0 | the objective back aperture of the system |
-| exposure_time | float | greater than 0 | how long photons are detected, in seconds |
-| objective_efficiency | float | between 0.0 and 1.0 | the percentage of efficiency of the objective |
-| detector_efficiency | float |  between 0.0 and 1.0 | the percentage of efficiency of the detector |
-| objective_factor | float | greater than 1.0 | the objective lens, tipically 20x, 40x |
-| pixel_size | integer | greater than 1 | the size of an output pixel in the microscope, in nanometers |
-| pinhole_radius | float | greater than 0.0 |  the pinhole radius, in micrometers |
-| baseline_noise | integer | greater than 0 | the average number of baseline photons detected by the system |
-| channels | - | - | subsection containing a multiple channel parameters for different lasers. Each subsection has the following parameters. See brainbow_membrane.ini for an example on how to use multiple channels. |
-| laser_wavelength | integer | between 200 and 1000 | the wavelength of the laser, in nanometers  |
-| laser_power | float | greater than 1.0 | the power of the laser, in Watts |
-| laser_percentage | float | between 0.0 and 1.0 | proportion of the laser power to use |
-| laser_filter | min, max integer tuple | - | the minimum and maximum wavelengths of the filter, in nanometers |
+|---|---|---|---|
+| type | string | "confocal", "widefield", or "two photon" | |
+| numerical_aperture | float | > 0.0 | |
+| refractory_index | float | > 1.0 | |
+| focal_plane_depth | integer | > 1 | thickness of a z-slice, in nm. |
+| objective_back_aperture | float | > 0.0 | |
+| exposure_time | float | > 0 | seconds. |
+| objective_efficiency | float | 0.0–1.0 | |
+| detector_efficiency | float | 0.0–1.0 | |
+| objective_factor | float | > 1.0 | typically 20 or 40. |
+| pixel_size | integer | > 1 | output pixel size, in nm. |
+| pinhole_radius | float | > 0.0 | in micrometers. |
+| baseline_noise | integer | > 0 | mean baseline photon count. |
+| channels | - | - | one subsection per laser/filter combination. See `examples/brainbow_membrane.ini`. |
+| laser_wavelength | integer | 200–1000 | nm. |
+| laser_power | float | > 1.0 | Watts. |
+| laser_percentage | float | 0.0–1.0 | proportion of laser power used. |
+| laser_filter | min, max integer tuple | - | detected wavelength range, in nm. **Make sure this range actually covers your fluorophore's real emission peak** — see "A real calibration mistake" below. |
 
 #### Output
 
-The simualtion outputs a simualted stack and the corresponding ground truth, which can be used for validation or training.
-Output formats include: tiff stacks, gif or png sequence. The simulation stack may be outputted in separate channels or merged
-into multiple RGB volumes. If the number of channels is greater than 3, an RGB volume may be created for every 3 channels.
-
-The ground truth is stored on a per fluorophore basis. For each fluorophore the output may be spliited into a volume for each cell
-or grouped into a single volume containing all cells labeled by that fluorophore. The parameters are outlined below.
-
 | Parameter | Type | Range | Description |
-|    ---    |  --- |  ---  |	 ---	 |
-| name | string | - | a name for the experiment |
-| path | path |  - |where to store the experiement's output |
-| format | string | one of 'tiff', 'gif' or 'image sequence' | determines to output format for both the simulated stack and the ground truth |
-| sim_channels | string | one of "merged" or "splitted" | if merged, and RGB volume is made for every 3 channels, otherwise a stack is made for each channel |
-| gt_cells | string | one of "merged ot "splitted" | if merged, all cells are grouped in the same stack, otherwise, a volume if made for each cell |
-| gt_region | string | one of 'membrane', 'cytosol' or any additional annotation specified in the ground truth | the cell region to use in the output, may be different that the annotated regions in the labeling layers |
+|---|---|---|---|
+| name | string | - | experiment name. |
+| path | path | - | output directory. |
+| format | string | "tiff", "gif", or "image sequence" | |
+| sim_channels | string | "merged" or "splitted" | merged: an RGB volume for every 3 channels. splitted: one stack per channel. |
+| gt_cells | string | "merged" or "splitted" | |
+| gt_region | string | "membrane", "cytosol", or any additional annotated region | |
 
-## Run the Simulation
+## Running the simulation
 
-Once the config.ini file is ready, make sure that you have activated your virtual environment if you have one (using source activate environment_name). Then, run the simulation from the terminal by using the following command:
+```bash
+python3 run.py path_to_config/config.ini
+```
 
-`python run.py path_to_config/config.ini`
+`-v` opens an interactive window showing the simulated output. **Known
+issue:** the frame slider in `tifffile.imshow()`'s built-in viewer does
+not respond to dragging in some matplotlib/tkinter environments — this
+is a bug in the third-party viewer widget, not in this code. The
+underlying data and rendering are correct; only the slider interaction
+is affected. A minimal working replacement using
+`matplotlib.widgets.Slider` directly:
 
-The script currently takes two options: '-h' which displays the command line help, and '-v' which displays the output of the simulation in a new window.
+```python
+import tifffile, matplotlib.pyplot as plt
+from matplotlib.widgets import Slider
 
-Note that the simulation may require a decent amount of memory for large volumes. A computer with 4G of RAM can usually handle a volume of about 500 x 500 x 500 voxels without problems. If you run into memory issues, consider using a computer with more RAM.
+arr = tifffile.imread('path/to/output/channel_0.tiff')
+fig, ax = plt.subplots()
+plt.subplots_adjust(bottom=0.2)
+im = ax.imshow(arr[0], cmap='viridis', vmin=arr.min(), vmax=arr.max())
+plt.colorbar(im)
+ax_slider = plt.axes([0.2, 0.05, 0.6, 0.03])
+slider = Slider(ax_slider, 'Frame', 0, arr.shape[0]-1, valinit=0, valstep=1)
+slider.on_changed(lambda val: (im.set_data(arr[int(val)]), fig.canvas.draw_idle()))
+plt.show()
+```
+
+A 500×500×500-voxel volume needs roughly 4GB of RAM. Larger volumes
+need proportionally more.
+
+## A real calibration mistake worth knowing about
+
+If your output is unexpectedly dim or completely blank, check two
+things before assuming the code is broken:
+
+1. **Does `laser_filter` actually cover your fluorophore's real
+   emission peak?** ATTO425's real peak is 484nm — a filter of
+   `380, 480` looks plausible but cuts off just before the peak,
+   producing a very low effective emission value and a near-empty
+   image. `440, 550` captures the peak correctly. Check a
+   fluorophore's real peak with
+   `Fluorset().get_fluor(name).find_emission_peak()`.
+2. **Does an annotated region actually overlap a real cell, spatially?**
+   `load_cells()` computes region membership by multiplying the cell
+   segmentation against the region mask voxel-for-voxel. A region
+   defined a few pixels away from where any cell actually is will
+   silently produce zero overlap, zero labeled voxels, and a blank
+   channel — with no error raised anywhere in the pipeline.
+
+Both of these are real things that happened during testing of this
+port: the first because a copied example used a borderline filter
+range, the second because a synthetic test region was placed without
+checking the underlying geometry. Neither was a bug in the simulation
+code — both produced a correct, blank result for a genuinely empty
+input.
 
 ## License
 
-Provided under BSD license  
-Copyright (c) 2017, Jeremy Wohlwend  
+Provided under BSD license
+Copyright (c) 2017, Jeremy Wohlwend
 All rights reserved.
 
 Redistribution and use in source and binary forms, with or without

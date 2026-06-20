@@ -31,13 +31,22 @@ load.py
 Set of functions to read ground truth data into simulation format. 
 The main function is load_gt which loads the ground truth data and returns
 the data in simulation format. The other methods are mainly helpers.
+
+Ported to Python 3:
+  - scipy.misc.imread (removed from SciPy since 1.2) replaced with
+    imageio.v3.imread, which is the actively maintained successor.
+    The original mode='I' kwarg told the old PIL-backed reader to
+    force 32-bit integer grayscale; imageio.v3 returns the image's
+    native dtype, so we explicitly cast to the same uint32 type the
+    rest of this module expects, preserving the original behavior.
+  - xrange -> range in load_image_sequence (Python 3's range is
+    already lazy like Python 2's xrange, so this is a like-for-like
+    swap with no behavior change).
 """
 
 #Could consider using a different convolution library
 from scipy.signal import fftconvolve
-#Not the fastest image loading library but opencv is annoying to install
-#Open to suggestions!
-from scipy.misc import imread
+import imageio.v3 as iio
 from tifffile import imread as tiffread
 import numpy as np
 import os
@@ -240,8 +249,11 @@ def load_image_sequence(image_path, offset, bounds):
     images = parse(image_path)
     d, w, h = bounds
     z, x, y = offset
-    for i in xrange(d):
-        im = imread(image_path + images[z + i], mode = 'I')
+    for i in range(d):
+        #imageio.v3.imread returns the image's native dtype; the
+        #original mode='I' forced 32-bit int grayscale, so cast
+        #explicitly here to match that behavior exactly.
+        im = iio.imread(image_path + images[z + i]).astype(np.uint32)
         gt[i, :, :] = im[x : x + w, y : y + h]
     return gt
 
@@ -366,10 +378,3 @@ def get_edges(array, isotropic):
     else:
         conv = np.pad(conv, ((0,0), (1,1), (1,1)), 'constant')
     return conv
-
-
-
-
-
-
-

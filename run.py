@@ -29,6 +29,16 @@
 run.py
 
 Main script to run the simulation.
+
+Ported to Python 3: seven print statements converted to function
+calls (5 status messages, 2 inside the config-validation error
+loop that used Python 2's % string-formatting print syntax). No
+other changes -- configobj 5.0.9 and the validate module it ships
+with both import and run cleanly under current Python 3, confirmed
+directly rather than assumed. Import structure (src.load, src.optics,
+etc.) kept exactly as the original repo layout requires -- this file
+must be run from the SimExm root directory, with src/ as a sibling
+package, for these imports to resolve.
 """
 
 import argparse
@@ -60,24 +70,24 @@ def run(config, show_output = False):
     #Remove voxel dim so that we can pass gt_params to the load_gt function
     del gt_params['voxel_dim']
 
-    print "Loading data..."
+    print("Loading data...")
     gt_dataset = load_gt(**gt_params)
 
-    print "Labeling..."
+    print("Labeling...")
     labeling_params = config['labeling']
     labeled_volumes, labeled_cells = label(gt_dataset, volume_dim, voxel_dim, labeling_params)
 
-    print "Imaging..."
+    print("Imaging...")
     expansion_params = config['expansion']
     optics_params = config['optics']
     volumes = resolve(labeled_volumes, volume_dim, voxel_dim, expansion_params, optics_params)
-    print "Saving..."
+    print("Saving...")
     #Save to desired output
     output_params = config['output']
     save(volumes, **output_params)
     save_gt(gt_dataset, labeled_cells, volume_dim, volumes[0].shape, voxel_dim,\
             expansion_params, optics_params, **output_params)
-    print "Done!"
+    print("Done!")
     if show_output:
         imshow(np.moveaxis(np.array(volumes), 0, 3))
         plt.show()
@@ -97,8 +107,8 @@ if __name__ == "__main__":
     if results != True:
         for (section_list, key, _) in flatten_errors(config, results):
             if key is not None:
-                print 'The "%s" key in the section "%s" failed validation' % (key, ', '.join(section_list))
+                print('The "%s" key in the section "%s" failed validation' % (key, ', '.join(section_list)))
             else:
-                print 'The following section was missing:%s ' % ', '.join(section_list)
+                print('The following section was missing:%s ' % ', '.join(section_list))
     #Run simulation
     run(config, args.v)

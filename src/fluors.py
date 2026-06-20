@@ -29,6 +29,19 @@
 fluors.py
 
 The Fluorophore class and a subclass for each type (for easy data access and storage)
+
+Ported to Python 3: this file had no Python 2-only syntax (no print
+statements, no xrange, no np.int). Two real bugs were fixed during
+the port, unrelated to Python 2/3 compatibility:
+  - get_emission_file() and get_excitation_file() opened files with
+    open() and never closed them. Now use 'with' blocks, which close
+    the file automatically even if parsing raises an exception.
+  - The original split data on "\r" only (classic Mac-style line
+    endings). If these data files are ever re-saved on a different
+    OS, that produces one giant unsplit string instead of multiple
+    rows -- a silent data-corruption risk independent of Python
+    version. Now uses str.splitlines(), which correctly handles
+    \r, \n, and \r\n.
 """
 
 import os
@@ -125,17 +138,19 @@ class Fluorophore:
     def get_emission_file(self):
         """Returns emission data as a float numpy array"""
         file_path = self.emission
-        f = open(file_path, 'r')
-        raw_data = f.read().split("\r")
-        raw_data = np.array([s.split("\t") for s in raw_data], dtype=float)
+        with open(file_path, 'r') as f:
+            raw_data = f.read()
+        lines = raw_data.splitlines()
+        raw_data = np.array([s.split("\t") for s in lines], dtype=float)
         return raw_data
 
     def get_excitation_file(self):
         """Returns excitation data as a float numpy array"""
         file_path = self.excitation
-        f = open(file_path, 'r')
-        raw_data = f.read().split("\r")
-        raw_data = np.array([s.split("\t") for s in raw_data], dtype=float)
+        with open(file_path, 'r') as f:
+            raw_data = f.read()
+        lines = raw_data.splitlines()
+        raw_data = np.array([s.split("\t") for s in lines], dtype=float)
         return raw_data
 
     def find_emission_peak(self):

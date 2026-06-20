@@ -30,6 +30,11 @@ labeling.py
 
 Set of methods to handle the labeling of ground truth data.
 Implements the brainbow method.
+
+Ported to Python 3. Only change from the original: the print
+statement in label() is now a function call. No logic, no
+numerical behavior, and no library dependencies changed in this
+file -- it had no dead-API imports to begin with.
 """
 import numpy as np
 from numpy.random import random_sample
@@ -65,7 +70,7 @@ def label(gt_dataset, volume_dim, voxel_dim, labeling_params):
     #Remove global_density
     layers.remove("global_density")
     for layer in layers:
-        print "Labeling {}".format(layer)
+        print("Labeling {}".format(layer))
         fluorophore = labeling_params[layer]['fluorophore']
         volume, cells  = brainbow(gt_dataset, volume_dim, voxel_dim, **labeling_params[layer])
         if fluorophore in labeled_volumes:
