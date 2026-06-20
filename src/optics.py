@@ -242,6 +242,11 @@ def scale(volume, voxel_dim, expansion, objective_factor,
         xy_scale = 1.0 / xy_step
     z_scale = voxel_dim[0] * expansion / float(focal_plane_depth)
     z_step = np.round(1.0 / z_scale).astype(int)
+    # z_step can round down to exactly 0 (e.g. via banker's rounding when
+    # 1.0/z_scale lands exactly on 0.5), which crashes range()'s step
+    # argument below. A step of 0 has no meaningful interpretation here
+    # anyway -- 1 is the smallest valid step (every slice kept).
+    z_step = max(z_step, 1)
     out = []
     for i in range(0, volume.shape[0], z_step):
         X, Y = np.nonzero(volume[i, :, :])

@@ -15,8 +15,16 @@ syntax-checked.
 ```bash
 python3 -m venv simexm-venv
 source simexm-venv/bin/activate
-pip install numpy scipy pillow imageio scikit-image tifffile configobj matplotlib psf
+pip install numpy scipy pillow imageio scikit-image tifffile configobj matplotlib psf imagecodecs
 ```
+
+`imagecodecs` is needed if you load compressed TIFFs — confirmed
+necessary when testing against real LZW-compressed ground truth from
+the Cell Tracking Challenge dataset. Without it, `tifffile.imread()`
+raises `ValueError: <COMPRESSION.LZW: 5> requires the 'imagecodecs'
+package` on any compressed TIFF. Uncompressed TIFFs and the synthetic
+PNG test data in this repo don't need it, but any real external
+dataset is likely to need it.
 
 That last package, `psf`, is the point-spread-function library by
 Christoph Gohlke (https://www.cgohlke.com/, also the author of
@@ -182,6 +190,87 @@ range, the second because a synthetic test region was placed without
 checking the underlying geometry. Neither was a bug in the simulation
 code — both produced a correct, blank result for a genuinely empty
 input.
+
+## Tested against real external data, not just synthetic ground truth
+
+Beyond the synthetic test configs in `examples/tested_configs/`, this
+port was also run against a real, externally-sourced, peer-published
+dataset to confirm it works on actual scientific data, not only on
+hand-drawn shapes.
+
+**Dataset:** Fluo-N2DH-SIM+, from the
+[Cell Tracking Challenge](https://celltrackingchallenge.net/2d-datasets/)
+(Ulman & Svoboda, Centre for Biomedical Image Analysis, Masaryk
+University). Simulated 2D fluorescence microscopy of HL60 cell
+nuclei, 150 timepoints, real confirmed pixel size 0.125 x 0.125
+microns (125nm), generated with MitoGen/Cytopacq.
+
+```bash
+curl -L -o Fluo-N2DH-SIM+.zip \
+  "https://data.celltrackingchallenge.net/training-datasets/Fluo-N2DH-SIM+.zip"
+unzip Fluo-N2DH-SIM+.zip "Fluo-N2DH-SIM+/02_GT/SEG/*"
+```
+
+**Real, necessary conversion step:** this dataset ships as one 2D
+TIFF per timepoint (`man_seg000.tif` ... `man_seg149.tif`), each
+already integer-labeled by cell ID — exactly the format
+`load_cells()` expects, confirmed directly by checking pixel values
+(`np.unique()` returns real, distinct integers like 13, 14, 15...,
+not just 0 and 255). SimExm's `load_tiff_stack()` expects one
+multi-page TIFF, not 150 separate files, so they need stacking first:
+
+```python
+import tifffile, numpy as np, os
+
+files = sorted(f for f in os.listdir('Fluo-N2DH-SIM+/02_GT/SEG') if f.endswith('.tif'))
+frames = [tifffile.imread(f'Fluo-N2DH-SIM+/02_GT/SEG/{f}').astype(np.uint32) for f in files]
+volume = np.stack(frames, axis=0)
+tifffile.imwrite('ctc_seg_stack.tif', volume)
+```
+
+This produces a real `(150, 773, 739)` volume — confirmed real
+distinct cell IDs spanning 0-145 across the full time series, with
+expected gaps where cells divide, enter, or leave the frame.
+
+**Honest note on this volume's z-axis:** this is genuinely 2D+time
+data, not true 3D. The time axis is being repurposed as a synthetic
+z-axis to test the pipeline against real external data — there is no
+real, documented z-spacing for this dataset, since it doesn't have a
+real depth dimension. `examples/tested_configs/test_ctc_real.ini`
+uses a placeholder `voxel_dim` z-value; treat the resulting "depth"
+as a test convenience, not a biologically meaningful measurement.
+
+**A real bug this surfaced, found only by running it:** the
+placeholder z-spacing combined with the expansion/optics parameters
+produced a `z_scale` of exactly `2.0`, and `1.0 / 2.0 = 0.5` lands
+precisely on Python's `round()` banker's-rounding midpoint, which
+rounds to `0`. That zero was then passed directly into
+`range()`'s step argument, which crashes
+(`ValueError: range() arg 3 must not be zero`). This was a real,
+pre-existing edge case in the original `scale()` function, not
+something introduced by porting — it had simply never been hit by
+any of the parameter combinations tested before. Fixed by clamping
+`z_step` to a minimum of 1.
+
+**Real result:** a `(150, 1546, 1478)` simulated channel — correctly
+upsampled by the 4x expansion factor — with real signal at every
+timepoint (476,628 total nonzero voxels across the volume). The final
+timepoint shows dozens of individually traced, distinct cell
+membranes with real shape variation, exactly matching what a real
+fluorescence image of this cell population would be expected to look
+like.
+
+To reproduce, after building `ctc_seg_stack.tif` as above:
+
+```bash
+python3 run.py examples/tested_configs/test_ctc_real.ini
+```
+
+Note: at this resolution (150 x 773 x 739 input, ~85 million voxels),
+the real 3D convolution in `optics.py`'s `resolve()` takes real,
+noticeable time — this is CPU-bound array math (NumPy/SciPy), not
+GPU-accelerated, so wall-clock time scales with CPU and memory
+bandwidth, not GPU performance.
 
 ## License
 

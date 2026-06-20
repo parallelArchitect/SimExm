@@ -110,3 +110,27 @@ No part of this port was declared complete based on import success or
 syntax checking alone. Every item above produced a traceback, an
 unexpected result, or a confirmed correct result from actually running
 it before being called done.
+
+### Added (real external data validation)
+
+- Tested the full pipeline against Fluo-N2DH-SIM+, a real, externally
+  sourced dataset from the Cell Tracking Challenge (Ulman & Svoboda,
+  Masaryk University) — 150 real timepoints of integer-labeled cell
+  segmentation, not synthetic hand-drawn shapes.
+- `imagecodecs` added to install instructions — required to read the
+  real LZW-compressed TIFFs in this dataset; not needed for the
+  synthetic PNG test data already in the repo, but needed for most
+  real external datasets.
+
+### Fixed
+
+- **`optics.py`, `scale()`, `z_step` rounding to zero.** Found only
+  by running the pipeline against real external data with a z-spacing
+  value that happened to produce a `z_scale` of exactly `2.0`. Python's
+  `round(1.0 / 2.0)` lands on `round()`'s banker's-rounding midpoint
+  and returns `0`, which was then passed directly into `range()`'s
+  step argument — `range()` raises `ValueError: range() arg 3 must
+  not be zero` on a zero step. This was a real, pre-existing edge
+  case in the original code, not introduced by the Python 3 port;
+  it had simply never been exercised by any prior test's parameter
+  combination. Fixed by clamping `z_step` to a minimum of 1.
